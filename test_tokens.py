@@ -1,0 +1,3 @@
+def example():
+    coffeecat
+example()
