@@ -323,6 +323,8 @@ PyAST_CompileObject(mod_ty mod, PyObject *filename, PyCompilerFlags *flags,
     PyCompilerFlags local_flags = _PyCompilerFlags_INIT;
     int merged;
 
+    // 编译总入口：把 parser 产出的 AST 变成 `PyCodeObject`。
+    // 这一步内部还会串起 future 特性处理、AST 优化、符号表分析和代码生成。
     if (!__doc__) {
         __doc__ = PyUnicode_InternFromString("__doc__");
         if (!__doc__)
@@ -338,6 +340,8 @@ PyAST_CompileObject(mod_ty mod, PyObject *filename, PyCompilerFlags *flags,
     Py_INCREF(filename);
     c.c_filename = filename;
     c.c_arena = arena;
+    // 先扫描 AST 里的 `from __future__ import ...`，
+    // 因为后面的编译行为会受这些 future 特性影响。
     c.c_future = PyFuture_FromASTObject(mod, filename);
     if (c.c_future == NULL)
         goto finally;
@@ -356,10 +360,14 @@ PyAST_CompileObject(mod_ty mod, PyObject *filename, PyCompilerFlags *flags,
     state.optimize = c.c_optimize;
     state.ff_features = merged;
 
+    // 先做 AST 级优化，例如常量折叠；
+    // 这一步发生在真正生成字节码之前。
     if (!_PyAST_Optimize(mod, arena, &state)) {
         goto finally;
     }
 
+    // 接着建立符号表，确定名字属于局部、全局、闭包还是 free var。
+    // 后续生成 LOAD_FAST / LOAD_GLOBAL / LOAD_DEREF 都依赖这个分析结果。
     c.c_st = PySymtable_BuildObject(mod, filename, c.c_future);
     if (c.c_st == NULL) {
         if (!PyErr_Occurred())
@@ -367,6 +375,7 @@ PyAST_CompileObject(mod_ty mod, PyObject *filename, PyCompilerFlags *flags,
         goto finally;
     }
 
+    // 真正的代码生成入口：把 AST + 符号表信息压成最终的 `PyCodeObject`。
     co = compiler_mod(&c, mod);
 
  finally:

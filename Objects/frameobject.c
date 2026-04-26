@@ -866,6 +866,9 @@ PyFrameObject* _Py_HOT_FUNCTION
 _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
                      PyObject *globals, PyObject *locals)
 {
+    // 为一次代码执行创建 frame。
+    // 可以把 frame 理解为“这次调用的现场”：它会挂上 code、globals、locals、
+    // builtins、上一层 frame，以及后续字节码执行需要的栈空间。
 #ifdef Py_DEBUG
     if (code == NULL || globals == NULL || !PyDict_Check(globals) ||
         (locals != NULL && !PyMapping_Check(locals))) {
@@ -875,6 +878,8 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
 #endif
 
     PyFrameObject *back = tstate->frame;
+    // builtins 优先沿用调用者 frame 的上下文；如果当前没有上一层 frame，
+    // 就从 globals 对应模块环境里推导出 builtins。
     PyObject *builtins = frame_get_builtins(back, globals);
     if (builtins == NULL) {
         return NULL;
@@ -893,6 +898,9 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
     Py_INCREF(code);
     Py_INCREF(globals);
     f->f_globals = globals;
+    // locals 的布局由 code flags 决定：
+    // 大多数函数会使用“优化 locals”模式，直接把局部变量放进 f_localsplus；
+    // 某些场景则仍然需要显式的字典 locals。
     /* Most functions have CO_NEWLOCALS and CO_OPTIMIZED set. */
     if ((code->co_flags & (CO_NEWLOCALS | CO_OPTIMIZED)) ==
         (CO_NEWLOCALS | CO_OPTIMIZED))
@@ -922,6 +930,8 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
 
     assert(f->f_code != NULL);
 
+    // 到这里，一个“尚未开始执行”的 frame 就准备好了；
+    // 后续 `_PyEval_EvalFrameDefault()` 会在这个现场上推进字节码。
     return f;
 }
 

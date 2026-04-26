@@ -906,6 +906,9 @@ pyinit_core(_PyRuntimeState *runtime,
 {
     PyStatus status;
 
+    // `Py_InitializeFromConfig()` 的第一阶段：
+    // 读取和规范化配置，并创建最核心的 runtime / interpreter / thread state。
+    // 到这里解释器“活了”，但还没有完全进入可运行用户代码的状态。
     status = _Py_PreInitializeFromConfig(src_config, NULL);
     if (_PyStatus_EXCEPTION(status)) {
         return status;
@@ -967,6 +970,8 @@ init_interp_main(PyThreadState *tstate)
 {
     assert(!_PyErr_Occurred(tstate));
 
+    // 第二阶段主初始化：把 importlib、sys、编码、信号、标准流、
+    // __main__ 等用户真正会接触到的主运行时环境补齐。
     PyStatus status;
     int is_main_interp = _Py_IsMainInterpreter(tstate);
     PyInterpreterState *interp = tstate->interp;
@@ -1090,6 +1095,8 @@ static PyStatus
 pyinit_main(PyThreadState *tstate)
 {
     PyInterpreterState *interp = tstate->interp;
+    // 这是“从 core initialized 进入 fully initialized”的总入口。
+    // 如果解释器已经初始化过，则只做主解释器配置重同步。
     if (!interp->runtime->core_initialized) {
         return _PyStatus_ERR("runtime core not initialized");
     }
@@ -1122,6 +1129,8 @@ _Py_InitializeMain(void)
 PyStatus
 Py_InitializeFromConfig(const PyConfig *config)
 {
+    // 现代解释器初始化总入口：
+    // 先做 core 初始化，再按配置决定是否继续做 main 初始化。
     if (config == NULL) {
         return _PyStatus_ERR("initialization config is NULL");
     }
@@ -1135,13 +1144,19 @@ Py_InitializeFromConfig(const PyConfig *config)
     _PyRuntimeState *runtime = &_PyRuntime;
 
     PyThreadState *tstate = NULL;
+    // core 初始化会创建并返回主解释器对应的首个 thread state。
+    // 后面所有 main 初始化步骤，都会围绕这个 tstate 展开。
     status = pyinit_core(runtime, config, &tstate);
     if (_PyStatus_EXCEPTION(status)) {
         return status;
     }
+    // 这里重新取回“实际生效”的配置对象：
+    // pyinit_core() 可能已经根据环境变量、命令行和默认值规范化了配置。
     config = _PyInterpreterState_GetConfig(tstate->interp);
 
     if (config->_init_main) {
+        // 某些特殊模式（例如 freeze_importlib）可以跳过完整 main 初始化；
+        // 普通 `python script.py` 会继续走这一步，把解释器补成可运行用户代码的状态。
         status = pyinit_main(tstate);
         if (_PyStatus_EXCEPTION(status)) {
             return status;

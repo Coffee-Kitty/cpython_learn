@@ -35,11 +35,15 @@ pymain_init(const _PyArgv *args)
 {
     PyStatus status;
 
+    // 初始化全局 runtime。这个阶段还没真正创建完整解释器，
+    // 只是把 CPython 运行时的底座先搭起来。
     status = _PyRuntime_Initialize();
     if (_PyStatus_EXCEPTION(status)) {
         return status;
     }
 
+    // 预初始化：先根据命令行参数决定编码、内存分配、环境变量
+    // 等最早期配置，后面的完整配置读取依赖这一步。
     PyPreConfig preconfig;
     PyPreConfig_InitPythonConfig(&preconfig);
 
@@ -53,6 +57,8 @@ pymain_init(const _PyArgv *args)
 
     /* pass NULL as the config: config is read from command line arguments,
        environment variables, configuration files */
+    // 把 argv 写入 PyConfig。后续 `-c` / `-m` / 脚本文件 / REPL 的
+    // 分流，都会基于这里收集到的配置。
     if (args->use_bytes_argv) {
         status = PyConfig_SetBytesArgv(&config, args->argc, args->bytes_argv);
     }
@@ -63,6 +69,8 @@ pymain_init(const _PyArgv *args)
         goto done;
     }
 
+    // 真正初始化解释器：创建 interpreter/thread state，
+    // 并把 sys/importlib/builtins 等主运行时环境准备好。
     status = Py_InitializeFromConfig(&config);
     if (_PyStatus_EXCEPTION(status)) {
         goto done;
@@ -228,6 +236,8 @@ pymain_run_command(wchar_t *command, PyCompilerFlags *cf)
     PyObject *unicode, *bytes;
     int ret;
 
+    // `python -c "..."` 走这里：先把宽字符命令转成 UTF-8，
+    // 再交给通用的字符串执行入口。
     unicode = PyUnicode_FromWideChar(command, -1);
     if (unicode == NULL) {
         goto error;
@@ -257,6 +267,8 @@ static int
 pymain_run_module(const wchar_t *modname, int set_argv0)
 {
     PyObject *module, *runpy, *runmodule, *runargs, *result;
+    // `python -m pkg.mod` 本身并不直接执行模块文件，
+    // 而是委托给 Python 层的 `runpy._run_module_as_main()`。
     if (PySys_Audit("cpython.run_module", "u", modname) < 0) {
         return pymain_exit_err_print();
     }
@@ -308,6 +320,8 @@ static int
 pymain_run_file(const PyConfig *config, PyCompilerFlags *cf)
 {
     const wchar_t *filename = config->run_filename;
+    // `python script.py` 的主路径：打开文件，做少量预处理，
+    // 然后把控制权交给 `PyRun_AnyFileExFlags()`。
     if (PySys_Audit("cpython.run_file", "u", filename) < 0) {
         return pymain_exit_err_print();
     }
@@ -348,6 +362,8 @@ pymain_run_file(const PyConfig *config, PyCompilerFlags *cf)
     }
 
     /* call pending calls like signal handlers (SIGINT) */
+    // 在真正执行脚本前，先处理一次挂起调用；
+    // 否则像 SIGINT 这样的异步事件可能被无意义地延后。
     if (Py_MakePendingCalls() == -1) {
         fclose(fp);
         return pymain_exit_err_print();
@@ -381,6 +397,8 @@ pymain_run_startup(PyConfig *config, PyCompilerFlags *cf, int *exitcode)
 {
     int ret;
     PyObject *startup_obj = NULL;
+    // 只在交互式 stdin 模式下尝试执行 PYTHONSTARTUP；
+    // 它属于 REPL 体验的一部分，不属于普通脚本执行路径。
     if (!config->use_environment) {
         return 0;
     }
@@ -486,6 +504,8 @@ error:
 static int
 pymain_run_stdin(PyConfig *config, PyCompilerFlags *cf)
 {
+    // 没给脚本文件时走这里：可能是交互式 REPL，也可能是把 stdin
+    // 当作脚本源输入。
     if (stdin_is_interactive(config)) {
         config->inspect = 0;
         Py_InspectFlag = 0; /* do exit on SystemExit */
@@ -519,6 +539,8 @@ pymain_repl(PyConfig *config, PyCompilerFlags *cf, int *exitcode)
 {
     /* Check this environment variable at the end, to give programs the
        opportunity to set it from Python. */
+    // 这里处理的是“脚本执行完后是否继续掉进交互模式”。
+    // 典型场景是 `python -i script.py`。
     if (!config->inspect && _Py_GetEnv(config->use_environment, "PYTHONINSPECT")) {
         config->inspect = 1;
         Py_InspectFlag = 1;
@@ -546,6 +568,8 @@ pymain_run_python(int *exitcode)
     /* pymain_run_stdin() modify the config */
     PyConfig *config = (PyConfig*)_PyInterpreterState_GetConfig(interp);
 
+    // 这是启动完成后的总分发函数：
+    // 负责准备 sys.path[0]，然后在 -c / -m / 文件 / stdin 之间分流。
     PyObject *main_importer_path = NULL;
     if (config->run_filename != NULL) {
         /* If filename is a package (ex: directory or ZIP file) which contains
@@ -560,11 +584,15 @@ pymain_run_python(int *exitcode)
     }
 
     if (main_importer_path != NULL) {
+        // 如果 argv[0] 指向的是一个可导入包（目录或 zip），
+        // 那么后面会按 `python package_dir` -> `__main__` 的方式运行。
         if (pymain_sys_path_add_path0(interp, main_importer_path) < 0) {
             goto error;
         }
     }
     else if (!config->isolated) {
+        // 普通脚本模式下，把脚本所在路径或当前工作目录塞到 sys.path[0]。
+        // 这一步决定了“当前入口”对导入的影响。
         PyObject *path0 = NULL;
         int res = _PyPathConfig_ComputeSysPath0(&config->argv, &path0);
         if (res < 0) {
@@ -585,6 +613,12 @@ pymain_run_python(int *exitcode)
     pymain_header(config);
     pymain_import_readline(config);
 
+    // 运行路径分流顺序：
+    // 1. `-c`
+    // 2. `-m`
+    // 3. 目录/zip 中的 `__main__`
+    // 4. 普通脚本文件
+    // 5. stdin / REPL
     if (config->run_command) {
         *exitcode = pymain_run_command(config->run_command, &cf);
     }
@@ -674,6 +708,8 @@ Py_RunMain(void)
 {
     int exitcode = 0;
 
+    // 到这里说明解释器已经初始化完成；
+    // 这一步只负责运行用户请求的代码并做退出清理。
     pymain_run_python(&exitcode);
 
     if (Py_FinalizeEx() < 0) {
@@ -695,6 +731,8 @@ Py_RunMain(void)
 static int
 pymain_main(_PyArgv *args)
 {
+    // 这是 C 层 CLI 启动总入口：
+    // 先初始化，再执行；异常则在这里统一处理。
     PyStatus status = pymain_init(args);
     if (_PyStatus_IS_EXIT(status)) {
         pymain_free();
@@ -711,6 +749,7 @@ pymain_main(_PyArgv *args)
 int
 Py_Main(int argc, wchar_t **argv)
 {
+    // Windows 宽字符入口最终也会汇总到同一条 pymain_main() 路径。
     _PyArgv args = {
         .argc = argc,
         .use_bytes_argv = 0,
@@ -723,6 +762,7 @@ Py_Main(int argc, wchar_t **argv)
 int
 Py_BytesMain(int argc, char **argv)
 {
+    // Unix 风格入口：OS -> main() -> Py_BytesMain() -> pymain_main()。
     _PyArgv args = {
         .argc = argc,
         .use_bytes_argv = 1,

@@ -75,6 +75,9 @@ int
 PyRun_AnyFileExFlags(FILE *fp, const char *filename, int closeit,
                      PyCompilerFlags *flags)
 {
+    // 这是“从一个 FILE* 开始运行 Python 代码”的总入口。
+    // 它先判断当前输入是不是交互式终端；如果是，就走 REPL 路径，
+    // 否则就按普通文件脚本路径执行。
     if (filename == NULL)
         filename = "???";
     if (Py_FdIsInteractive(fp, filename)) {
@@ -98,6 +101,8 @@ PyRun_InteractiveLoopFlags(FILE *fp, const char *filename_str, PyCompilerFlags *
     int show_ref_count = _Py_GetConfig()->show_ref_count;
 #endif
 
+    // 这是 REPL 的“循环层”。
+    // 它负责反复读取一条交互输入、执行、打印异常，并在 EOF 时退出循环。
     filename = PyUnicode_DecodeFSDefault(filename_str);
     if (filename == NULL) {
         PyErr_Print();
@@ -189,6 +194,9 @@ PyRun_InteractiveOneObjectEx(FILE *fp, PyObject *filename,
     _Py_IDENTIFIER(encoding);
     _Py_IDENTIFIER(__main__);
 
+    // 这是 REPL 的“单次执行层”：
+    // 读取一条输入，解析成 AST，放进 __main__ 模块命名空间，再执行一次。
+    // InteractiveLoopFlags() 会反复调用它。
     mod_name = _PyUnicode_FromId(&PyId___main__); /* borrowed */
     if (mod_name == NULL) {
         return -1;
@@ -239,7 +247,11 @@ PyRun_InteractiveOneObjectEx(FILE *fp, PyObject *filename,
         return -1;
     }
 
+    // Arena 会承接这一轮解析得到的临时 AST 对象；
+    // 交互输入虽然只执行一条语句，但仍然复用和脚本执行相同的内存管理方式。
+
     if (use_peg) {
+        // 单行交互输入也会进入 parser，只是 start rule 是 `Py_single_input`。
         mod = PyPegen_ASTFromFileObject(fp, filename, Py_single_input,
                                         enc, ps1, ps2, flags, &errcode, arena);
     }
@@ -260,12 +272,14 @@ PyRun_InteractiveOneObjectEx(FILE *fp, PyObject *filename,
         }
         return -1;
     }
+
     m = PyImport_AddModuleObject(mod_name);
     if (m == NULL) {
         PyArena_Free(arena);
         return -1;
     }
     d = PyModule_GetDict(m);
+    // 交互输入最终也会复用普通执行路径：AST -> run_mod() -> compile -> eval。
     v = run_mod(mod, filename, d, d, flags, arena);
     PyArena_Free(arena);
     if (v == NULL) {
@@ -387,6 +401,9 @@ PyRun_SimpleFileExFlags(FILE *fp, const char *filename, int closeit,
     int set_file_name = 0, ret = -1;
     size_t len;
 
+    // 这是“把一个脚本文件当成 __main__ 来运行”的高层入口。
+    // 它会准备 __main__.__file__ / __cached__ / __loader__，
+    // 然后决定当前输入是 `.py` 还是 `.pyc`，再分派到对应执行路径。
     m = PyImport_AddModule("__main__");
     if (m == NULL)
         return -1;
@@ -411,6 +428,7 @@ PyRun_SimpleFileExFlags(FILE *fp, const char *filename, int closeit,
     len = strlen(filename);
     ext = filename + len - (len > 4 ? 4 : 0);
     if (maybe_pyc_file(fp, filename, ext, closeit)) {
+        // `.pyc` 直接走反序列化 + 执行路径。
         FILE *pyc_fp;
         /* Try to run a pyc file. First, re-open in binary */
         if (closeit)
@@ -428,6 +446,7 @@ PyRun_SimpleFileExFlags(FILE *fp, const char *filename, int closeit,
         }
         v = run_pyc_file(pyc_fp, filename, d, d, flags);
     } else {
+        // 普通 `.py` 文件继续走 parser -> compile -> eval 的标准路径。
         /* When running from stdin, leave __main__.__loader__ alone */
         if (strcmp(filename, "<stdin>") != 0 &&
             set_main_loader(d, filename, "SourceFileLoader") < 0) {
@@ -463,6 +482,8 @@ int
 PyRun_SimpleStringFlags(const char *command, PyCompilerFlags *flags)
 {
     PyObject *m, *d, *v;
+    // `python -c` 最终会来到这里：
+    // 它把源码字符串当成一个“文件级输入”放进 __main__ 命名空间执行。
     m = PyImport_AddModule("__main__");
     if (m == NULL)
         return -1;
@@ -1060,6 +1081,8 @@ PyRun_StringFlags(const char *str, int start, PyObject *globals,
     PyObject *filename;
     int use_peg = _PyInterpreterState_GET()->config._use_peg_parser;
 
+    // 这是“从内存中的源码字符串直接运行”的总入口。
+    // 它和文件执行路径共享后半段：先 parse 成 AST，再走 run_mod()。
     filename = _PyUnicode_FromId(&PyId_string); /* borrowed */
     if (filename == NULL)
         return NULL;
@@ -1068,6 +1091,8 @@ PyRun_StringFlags(const char *str, int start, PyObject *globals,
     if (arena == NULL)
         return NULL;
 
+    // 这是字符串版本的 parse/compile 临时内存池；
+    // 生命周期只覆盖本次字符串输入。
     if (use_peg) {
         mod = PyPegen_ASTFromStringObject(str, filename, start, flags, arena);
     }
@@ -1076,6 +1101,7 @@ PyRun_StringFlags(const char *str, int start, PyObject *globals,
     }
 
     if (mod != NULL)
+        // 一旦拿到 AST，就和文件输入路径汇合。
         ret = run_mod(mod, filename, globals, locals, flags, arena);
     PyArena_Free(arena);
     return ret;
@@ -1091,6 +1117,8 @@ PyRun_FileExFlags(FILE *fp, const char *filename_str, int start, PyObject *globa
     PyObject *filename;
     int use_peg = _PyInterpreterState_GET()->config._use_peg_parser;
 
+    // `python helloworld.py` 到达这里时，CLI 层已经完成分流。
+    // 这个函数负责把“文件流”推进到“AST -> code object -> 执行”的总路径。
     filename = PyUnicode_DecodeFSDefault(filename_str);
     if (filename == NULL)
         goto exit;
@@ -1099,7 +1127,12 @@ PyRun_FileExFlags(FILE *fp, const char *filename_str, int start, PyObject *globa
     if (arena == NULL)
         goto exit;
 
+    // Arena 是这一轮 parse/compile 临时对象的内存池：
+    // 解析得到的 AST 节点、编译阶段的中间对象都会挂在这里，
+    // 最后统一释放，避免层层手动回收。
     if (use_peg) {
+        // 文件输入默认先进入 PEG parser，输出 `mod_ty` 形式的 AST。
+        // `start` 一般是 `Py_file_input`，表示按完整脚本文件语法解析。
         mod = PyPegen_ASTFromFileObject(fp, filename, start, NULL, NULL, NULL,
                                         flags, NULL, arena);
     }
@@ -1113,6 +1146,7 @@ PyRun_FileExFlags(FILE *fp, const char *filename_str, int start, PyObject *globa
     if (mod == NULL) {
         goto exit;
     }
+    // 这里开始从“解析阶段”进入“编译 + 执行阶段”。
     ret = run_mod(mod, filename, globals, locals, flags, arena);
 
 exit:
@@ -1128,6 +1162,8 @@ flush_io(void)
     PyObject *f, *r;
     PyObject *type, *value, *traceback;
 
+    // 执行器在打印异常或交互输出后，经常需要显式 flush stdout/stderr。
+    // 这里会临时保存当前异常状态，flush 完再恢复，避免把原异常冲掉。
     /* Save the current exception */
     PyErr_Fetch(&type, &value, &traceback);
 
@@ -1167,6 +1203,8 @@ run_eval_code_obj(PyThreadState *tstate, PyCodeObject *co, PyObject *globals, Py
      */
     _Py_UnhandledKeyboardInterrupt = 0;
 
+    // 这里还没有进入字节码循环；它先补齐 builtins，
+    // 然后把编译出的 `PyCodeObject` 送到求值器入口 `PyEval_EvalCode()`。
     /* Set globals['__builtins__'] if it doesn't exist */
     if (globals != NULL && PyDict_GetItemString(globals, "__builtins__") == NULL) {
         if (PyDict_SetItemString(globals, "__builtins__",
@@ -1187,6 +1225,8 @@ run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
             PyCompilerFlags *flags, PyArena *arena)
 {
     PyThreadState *tstate = _PyThreadState_GET();
+    // 这里是“AST -> code object -> execution”的桥：
+    // 先编译 AST，再进入实际执行阶段。
     PyCodeObject *co = PyAST_CompileObject(mod, filename, flags, -1, arena);
     if (co == NULL)
         return NULL;
@@ -1196,6 +1236,9 @@ run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
         return NULL;
     }
 
+    // 在真正执行前先走一次审计钩子；
+    // embedding / sandbox / 监控方可以在这里拦截“即将执行某个 code object”。
+    // 审计通过后，才真正进入 code object 的执行。
     PyObject *v = run_eval_code_obj(tstate, co, globals, locals);
     Py_DECREF(co);
     return v;
@@ -1211,6 +1254,8 @@ run_pyc_file(FILE *fp, const char *filename, PyObject *globals,
     long magic;
     long PyImport_GetMagicNumber(void);
 
+    // `.pyc` 文件路径不需要 parser 和 compiler：
+    // 它直接从文件里反序列化出 `PyCodeObject`，然后复用 run_eval_code_obj()。
     magic = PyMarshal_ReadLongFromFile(fp);
     if (magic != PyImport_GetMagicNumber()) {
         if (!PyErr_Occurred())
@@ -1255,6 +1300,9 @@ Py_CompileStringObject(const char *str, PyObject *filename, int start,
     if (arena == NULL)
         return NULL;
 
+    // 这是“只编译，不执行”的入口。
+    // 它会把源码字符串解析成 AST；如果调用方只要 AST，就直接返回 AST 对象，
+    // 否则继续编译成 `PyCodeObject`。
     if (use_peg) {
         mod = PyPegen_ASTFromStringObject(str, filename, start, flags, arena);
     }

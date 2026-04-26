@@ -1153,6 +1153,8 @@ _PyPegen_run_parser_from_file_pointer(FILE *fp, int start_rule, PyObject *filena
                              const char *enc, const char *ps1, const char *ps2,
                              PyCompilerFlags *flags, int *errcode, PyArena *arena)
 {
+    // 这是 “文件 -> tokenizer -> PEG parser -> AST” 的核心入口。
+    // `helloworld.py` 在这里第一次从纯文本进入语法分析阶段。
     struct tok_state *tok = PyTokenizer_FromFile(fp, enc, ps1, ps2);
     if (tok == NULL) {
         if (PyErr_Occurred()) {
@@ -1168,13 +1170,19 @@ _PyPegen_run_parser_from_file_pointer(FILE *fp, int start_rule, PyObject *filena
     // From here on we need to clean up even if there's an error
     mod_ty result = NULL;
 
+    // parser flags 会把 future / type comments / dont-imply-dedent 等编译选项
+    // 转换成 parser 层能理解的行为开关。
     int parser_flags = compute_parser_flags(flags);
+    // 这里真正创建 PEG parser 实例：
+    // tokenizer 提供 token 流，parser 负责按 grammar 规则把它规约成 AST。
     Parser *p = _PyPegen_Parser_New(tok, start_rule, parser_flags, PY_MINOR_VERSION,
                                     errcode, arena);
     if (p == NULL) {
         goto error;
     }
 
+    // 一旦 `_PyPegen_run_parser()` 成功返回，`result` 就是一棵 `mod_ty` AST，
+    // 后续会被 `PyAST_CompileObject()` 接手进入编译阶段。
     result = _PyPegen_run_parser(p);
     _PyPegen_Parser_Free(p);
 

@@ -46,6 +46,8 @@ PyPegen_ASTFromFileObject(FILE *fp, PyObject *filename_ob, int mode,
                           const char *enc, const char *ps1, const char* ps2,
                           PyCompilerFlags *flags, int *errcode, PyArena *arena)
 {
+    // PEG parser 的文件入口：把文件对象交给更底层的 parser runner，
+    // 最终产出供编译器使用的 AST。
     if (PySys_Audit("compile", "OO", Py_None, filename_ob) < 0) {
         return NULL;
     }

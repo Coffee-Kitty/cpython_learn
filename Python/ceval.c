@@ -806,6 +806,8 @@ static int unpack_iterable(PyThreadState *, PyObject *, int, int, PyObject **);
 PyObject *
 PyEval_EvalCode(PyObject *co, PyObject *globals, PyObject *locals)
 {
+    // 这是从外部进入求值器的常见入口。
+    // 对 `helloworld.py` 来说，编译完成后的 `PyCodeObject` 会先到这里。
     return PyEval_EvalCodeEx(co,
                       globals, locals,
                       (PyObject **)NULL, 0,
@@ -891,6 +893,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, PyFrameObject *f, int throwflag)
 {
     _Py_EnsureTstateNotNULL(tstate);
 
+    // CPython 的默认字节码解释执行循环。
+    // 前面链路上的所有工作，最后都是为了把控制权送到这里逐条执行 opcode。
 #ifdef DXPAIRS
     int lastopcode = 0;
 #endif
@@ -4054,6 +4058,9 @@ _PyEval_EvalCode(PyThreadState *tstate,
 {
     assert(is_tstate_valid(tstate));
 
+    // 真正把 code object 变成“可执行现场”的入口：
+    // 这里会创建 frame、填参数、准备 locals/freevars，
+    // 然后跳进 `_PyEval_EvalFrame()` / `_PyEval_EvalFrameDefault()`。
     PyCodeObject* co = (PyCodeObject*)_co;
     PyFrameObject *f;
     PyObject *retval = NULL;
@@ -4074,6 +4081,8 @@ _PyEval_EvalCode(PyThreadState *tstate,
     if (f == NULL) {
         return NULL;
     }
+    // `f_localsplus` 是 frame 最核心的一块连续内存：
+    // 前半段存 fast locals，后半段接 cell/free vars，eval loop 会直接读写它。
     fastlocals = f->f_localsplus;
     freevars = f->f_localsplus + co->co_nlocals;
 
@@ -4093,6 +4102,8 @@ _PyEval_EvalCode(PyThreadState *tstate,
     }
 
     /* Copy all positional arguments into local variables */
+    // 先把位置参数拷贝进 fast locals 对应槽位；
+    // 后面字节码访问形参，本质上就是在读这些槽。
     if (argcount > co->co_argcount) {
         n = co->co_argcount;
     }
@@ -4115,6 +4126,8 @@ _PyEval_EvalCode(PyThreadState *tstate,
     }
 
     /* Handle keyword arguments passed as two strided arrays */
+    // 关键字参数要么匹配到已有形参槽位，要么落进 **kwargs；
+    // 两边都不匹配时，会在这里抛出 TypeError。
     kwcount *= kwstep;
     for (i = 0; i < kwcount; i += kwstep) {
         PyObject **co_varnames;
@@ -4190,6 +4203,7 @@ _PyEval_EvalCode(PyThreadState *tstate,
     }
 
     /* Add missing positional arguments (copy default values from defs) */
+    // 对未传入的位置参数，用函数定义时记录的默认值补齐。
     if (argcount < co->co_argcount) {
         Py_ssize_t m = co->co_argcount - defcount;
         Py_ssize_t missing = 0;
@@ -4216,6 +4230,7 @@ _PyEval_EvalCode(PyThreadState *tstate,
     }
 
     /* Add missing keyword arguments (copy default values from kwdefs) */
+    // kw-only 参数也在这里补默认值；补不齐就报 missing arguments。
     if (co->co_kwonlyargcount > 0) {
         Py_ssize_t missing = 0;
         for (i = co->co_argcount; i < total_args; i++) {
@@ -4244,6 +4259,8 @@ _PyEval_EvalCode(PyThreadState *tstate,
 
     /* Allocate and initialize storage for cell vars, and copy free
        vars into frame. */
+    // 闭包相关变量会在这里转成 cell/free var 结构，
+    // 这样内层函数和外层函数才能共享同一份绑定。
     for (i = 0; i < PyTuple_GET_SIZE(co->co_cellvars); ++i) {
         PyObject *c;
         Py_ssize_t arg;
@@ -4270,6 +4287,8 @@ _PyEval_EvalCode(PyThreadState *tstate,
     }
 
     /* Handle generator/coroutine/asynchronous generator */
+    // 如果这是 generator/coroutine，这里不会立刻执行字节码，
+    // 而是返回一个持有该 frame 的生成器对象，等后续 resume 时再真正跑。
     if (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) {
         PyObject *gen;
         int is_coro = co->co_flags & CO_COROUTINE;
@@ -4296,6 +4315,8 @@ _PyEval_EvalCode(PyThreadState *tstate,
         return gen;
     }
 
+    // 普通函数/模块代码会在这里正式跳进 frame evaluator。
+    // 默认 evaluator 就是 `_PyEval_EvalFrameDefault()`。
     retval = _PyEval_EvalFrame(tstate, f, 0);
 
 fail: /* Jump here from prelude on failure */
